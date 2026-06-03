@@ -43,7 +43,7 @@ def DynamicLoad(pkg):
     # Used to dynamically load modules in commandline options.
 
     def _split_name(modnamefull):
-        m = re.fullmatch('(\w+)(\[((\w+(=[\w\.\+\-~@/_\*]+)?,?)*)\])?', modnamefull)
+        m = re.fullmatch(r'(\w+)(\[((\w+(=[\w\.\+\-~@/_\*]+)?,?)*)\])?', modnamefull)
         if m is None:
             logger.error(f"Incorrect import string {modnamefull}")
             raise RuntimeError("Incorrect import.")

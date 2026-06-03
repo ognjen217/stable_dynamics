@@ -1,0 +1,28 @@
+#!/bin/bash
+set -e
+
+OUTDIR="experiments/dc-motor-stable"
+MODEL="stabledynamics[latent_space_dim=2,a=0.001,projfn=NN-REHU,projfn_eps=0.01,smooth_v=0,hp=60,h=100,rehu=0.001]"
+TRAIN_DATA="dc_motor[n=50000]"
+TEST_DATA="dc_motor[n=10000,test]"
+
+mkdir -p "$OUTDIR"
+echo "$MODEL" > "$OUTDIR/model"
+
+date >> "$OUTDIR/progress.txt"
+./.colorize ./train.py                         \
+    --log-to "runs/$OUTDIR"                   \
+    --batch-size 2048                          \
+    --learning-rate "0.001"                   \
+    --epochs 500                               \
+    --save-every 50                            \
+    --test-with "$TEST_DATA"                  \
+    "$TRAIN_DATA"                            \
+    "$MODEL"                                 \
+    "$OUTDIR/checkpoint_{epoch:0>5}.pth" | tee -a "$OUTDIR/progress.txt"
+
+./.colorize ./dc_motor_rollout.py              \
+    "$TEST_DATA"                             \
+    "$MODEL"                                 \
+    "$OUTDIR/checkpoint_*.pth"               \
+    --outdir "$OUTDIR/eval" | tee -a "$OUTDIR/eval.txt"

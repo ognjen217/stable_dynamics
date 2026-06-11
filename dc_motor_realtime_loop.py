@@ -30,6 +30,8 @@ state and input.
 import argparse
 import csv
 import os
+import select
+import sys
 import time
 from pathlib import Path
 
@@ -79,8 +81,65 @@ def input_signal(t, args):
         period = 1.0 / args.frequency
         phase = (tau % period) / period
         return amp if phase < args.duty else 0.0
+    if kind == "live":
+        return amp
 
     raise ValueError(f"Unknown input kind: {args.input_kind}")
+
+
+def print_live_input_help(args):
+    print()
+    print("Live voltage control")
+    print("--------------------")
+    print("Type a voltage and press Enter to apply it on the next simulation step.")
+    print(f"Examples: 2.5, -1, 0, +, -  (+/- use step {args.live_step} V)")
+    print("Commands: zero, status, q")
+    print()
+
+
+def poll_live_voltage(current_va, args, t, x_model, energy_model):
+    """Read all pending terminal commands without blocking the simulation loop."""
+    stop_requested = False
+
+    while True:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.0)
+        if not readable:
+            break
+
+        line = sys.stdin.readline()
+        if line == "":
+            break
+
+        command = line.strip().lower()
+        if not command:
+            continue
+
+        if command in ["q", "quit", "exit", "stop"]:
+            stop_requested = True
+            break
+        if command in ["z", "zero"]:
+            current_va = 0.0
+        elif command in ["+", "up"]:
+            current_va += args.live_step
+        elif command in ["-", "down"]:
+            current_va -= args.live_step
+        elif command in ["s", "status"]:
+            print(
+                f"t={t:.3f}s Va={current_va:.6g} "
+                f"omega={x_model[0]:.6g} current={x_model[1]:.6g} "
+                f"energy={energy_model:.6g}"
+            )
+            continue
+        else:
+            try:
+                current_va = float(command)
+            except ValueError:
+                print(f"Ignored unknown live input command: {command!r}")
+                continue
+
+        print(f"t={t:.3f}s Va set to {current_va:.6g} V")
+
+    return current_va, stop_requested
 
 
 def motor_energy_np(x, params):
@@ -262,6 +321,10 @@ def run(args):
     params["Tl"] = 0.0
     rhs_auto = dc_motor_gradient(params)
 
+    if args.input_kind == "live" and not args.realtime:
+        args.realtime = True
+        print("Live input enabled wall-clock pacing (--realtime).")
+
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     model, weight = load_model(args, device)
     if model is None and not args.solver_only:
@@ -277,9 +340,12 @@ def run(args):
     print(f"dt [s]:          {args.dt}")
     print(f"duration [s]:    {args.duration}")
     print(f"energy budget:   {args.energy_budget}")
+    if args.input_kind == "live":
+        print_live_input_help(args)
 
     x_model = np.array([args.x0_omega, args.x0_current], dtype=np.float32)
     x_solver = x_model.copy()
+    live_va = float(args.amplitude)
 
     hist = {
         "t": [], "x_model": [], "va": [], "energy_model": [],
@@ -300,9 +366,15 @@ def run(args):
 
     for step in range(steps):
         t = step * args.dt
-        va = float(input_signal(t, args))
 
         energy_model = float(motor_energy_np(x_model, params))
+        if args.input_kind == "live":
+            live_va, stop_requested = poll_live_voltage(live_va, args, t, x_model, energy_model)
+            va = live_va
+        else:
+            stop_requested = False
+            va = float(input_signal(t, args))
+
         current_for_power = float(x_model[1])
         input_power = va * current_for_power
 
@@ -323,6 +395,10 @@ def run(args):
 
         if args.energy_budget is not None and cumulative_pos_energy >= args.energy_budget:
             print(f"Stopping: positive input energy budget reached at t={t:.4f}s")
+            break
+
+        if stop_requested:
+            print(f"Stopping: live input requested stop at t={t:.4f}s")
             break
 
         if step == steps - 1:
@@ -385,8 +461,9 @@ def parse_args():
     parser.add_argument("--compare-solver", action="store_true", help="also run the analytic solver in parallel for comparison")
     parser.add_argument("--cpu", action="store_true", help="force CPU")
 
-    parser.add_argument("--input-kind", default="step", choices=["none", "constant", "step", "ramp", "sine", "pulse"], help="input voltage profile")
+    parser.add_argument("--input-kind", default="step", choices=["none", "constant", "step", "ramp", "sine", "pulse", "live"], help="input voltage profile")
     parser.add_argument("--amplitude", type=float, default=2.0, help="input voltage amplitude [V]")
+    parser.add_argument("--live-step", type=float, default=0.25, help="voltage increment for +/- commands in live input mode [V]")
     parser.add_argument("--input-start", type=float, default=0.5, help="time when input starts [s]")
     parser.add_argument("--rise-time", type=float, default=2.0, help="ramp rise time [s]")
     parser.add_argument("--frequency", type=float, default=1.0, help="sine/pulse frequency [Hz]")
